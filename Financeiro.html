@@ -69,6 +69,12 @@
   .exp-toggle.open .exp-chevron{transform:rotate(90deg);}
   #dreWaterfall{display:none;margin-top:8px;}
   #dreWaterfall.open{display:block;}
+  .dre-search-wrap{margin-top:10px;}
+  #dreSearch{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:9px;
+    font-size:13.5px;font-family:inherit;background:#fdfcf9;color:var(--ink);}
+  #dreSearch:focus{outline:2px solid var(--forest-2);outline-offset:1px;}
+  .dre-search-meta{font-size:11.5px;color:var(--ink-soft);margin-top:5px;}
+  .dre-mark{background:var(--gold-soft);color:#6b4f1f;border-radius:3px;padding:0 1px;}
 
   .dre-line{border-bottom:1px solid var(--border);}
   .dre-row{display:flex;align-items:center;gap:8px;padding:9px 4px;cursor:pointer;}
@@ -149,6 +155,10 @@
         <div class="exp-meta">Demonstração de Resultado do Exercício, na ordem oficial. Linhas com seta abrem a composição.</div>
       </div>
       <div class="exp-toggle" id="expToggle"><span class="exp-chevron">▶</span><span id="expToggleLabel">Mostrar DRE</span></div>
+    </div>
+    <div class="dre-search-wrap">
+      <input type="text" id="dreSearch" placeholder="Buscar categoria ou conta (ex: Manutenção, Diaristas, Marketing...)" autocomplete="off">
+      <div class="dre-search-meta" id="dreSearchMeta"></div>
     </div>
     <div id="dreWaterfall"></div>
   </div>
@@ -456,17 +466,57 @@ function periodReal(obj){
   return sliceSum(obj.real2026, period.from, period.to);
 }
 
+// ---------- Search / filter ----------
+function norm(s){
+  return (s||'').toString().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+}
+let searchTerm = '';
+function matches(name){
+  if(!searchTerm) return true;
+  return norm(name).includes(searchTerm);
+}
+function highlightName(name){
+  if(!searchTerm) return name;
+  const n = norm(name);
+  const idx = n.indexOf(searchTerm);
+  if(idx === -1) return name;
+  return name.slice(0, idx) + '<span class="dre-mark">' + name.slice(idx, idx+searchTerm.length) + '</span>' + name.slice(idx+searchTerm.length);
+}
+
+document.getElementById('dreSearch').addEventListener('input', (e) => {
+  searchTerm = norm(e.target.value);
+  if(searchTerm) setDreExpanded(true);
+  renderDreWaterfall();
+});
+
 function renderDreWaterfall(){
   const box = document.getElementById('dreWaterfall');
   box.innerHTML = '';
 
-  // Receita Operacional Líquida for the selected period — base for margin % calculations
   const receitaLiqLine = DRE_LINES.find(l => l.nome === 'Receita Operacional Líquida');
   const receitaLiqPeriodo = receitaLiqLine ? periodReal(receitaLiqLine) : null;
 
+  let totalMatches = 0;
+
   DRE_LINES.forEach(line => {
-    const hasChildren = line.children && line.children.length > 0;
-    const isOpen = dreOpen.has(line.nome);
+    const allChildren = line.children || [];
+    // Pre-compute, per child, whether it directly matches and which of its leaves match
+    const childInfo = allChildren.map(c => {
+      const leafAccounts = (LEAF_BY_NIVEL3[c.nome] || []);
+      const childMatches = matches(c.nome);
+      const matchingLeaves = leafAccounts.filter(lf => childMatches || matches(lf.nome));
+      const visible = !searchTerm || childMatches || matchingLeaves.length > 0;
+      return { c, leafAccounts, childMatches, matchingLeaves, visible };
+    });
+    const lineMatches = matches(line.nome);
+    const lineVisible = !searchTerm || lineMatches || childInfo.some(ci => ci.visible);
+    if(!lineVisible) return;
+
+    const visibleChildren = searchTerm ? childInfo.filter(ci => ci.visible) : childInfo;
+    const hasChildren = visibleChildren.length > 0;
+    const isOpen = searchTerm ? true : dreOpen.has(line.nome);
     const isActive = dreActiveKey === line.nome;
 
     const wrap = document.createElement('div');
@@ -476,7 +526,6 @@ function renderDreWaterfall(){
     row.className = 'dre-row' + (isActive ? ' active' : '');
     const tval = periodReal(line);
 
-    // Show margin % under EBITDA and Lucro Líquido, as a % of Receita Operacional Líquida no mesmo período
     let marginHtml = '';
     if((line.nome === 'EBITDA' || line.nome === 'Lucro Líquido / Prejuízo') && tval!=null && receitaLiqPeriodo){
       const pct = (tval/receitaLiqPeriodo)*100;
@@ -484,26 +533,28 @@ function renderDreWaterfall(){
     }
 
     row.innerHTML = `<span class="dre-arrow ${hasChildren?(isOpen?'open':''):'leaf'}">▶</span>` +
-      `<span class="dre-name">${line.nome}${marginHtml}</span><span class="dre-value">${tval!=null?fmtBRL(tval):'—'}</span>`;
+      `<span class="dre-name">${highlightName(line.nome)}${marginHtml}</span><span class="dre-value">${tval!=null?fmtBRL(tval):'—'}</span>`;
     row.addEventListener('click', () => {
       selectDreLine(line);
-      if(hasChildren){
+      if(hasChildren && !searchTerm){
         if(dreOpen.has(line.nome)) dreOpen.delete(line.nome); else dreOpen.add(line.nome);
         renderDreWaterfall();
       }
     });
     wrap.appendChild(row);
+    if(lineMatches) totalMatches++;
 
     if(hasChildren){
       const childBox = document.createElement('div');
       childBox.className = 'dre-children' + (isOpen ? ' open' : '');
-      line.children.slice().sort((a,b)=> (periodReal(b)||0)-(periodReal(a)||0)).forEach(c => {
+      visibleChildren.slice().sort((a,b)=> (periodReal(b.c)||0)-(periodReal(a.c)||0)).forEach(ci => {
+        const c = ci.c;
         const cKey = line.nome + ' › ' + c.nome;
         const cActive = dreActiveKey === cKey;
-        const leafAccounts = (LEAF_BY_NIVEL3[c.nome] || []).slice()
+        const leafAccounts = (searchTerm ? ci.matchingLeaves : ci.leafAccounts).slice()
           .sort((a,b)=> (periodReal(b)||0)-(periodReal(a)||0));
         const hasLeaves = leafAccounts.length > 0;
-        const cOpen = childOpen.has(cKey);
+        const cOpen = searchTerm ? true : childOpen.has(cKey);
 
         const cWrap = document.createElement('div');
         cWrap.className = 'dre-line' + (cActive ? ' active' : '');
@@ -512,16 +563,17 @@ function renderDreWaterfall(){
         cRow.className = 'dre-child-row' + (cActive ? ' active' : '');
         const ct = periodReal(c);
         cRow.innerHTML = `<span class="dre-arrow ${hasLeaves?(cOpen?'open':''):'leaf'}" style="width:12px;flex:0 0 12px;">▶</span>` +
-          `<span style="flex:1;">${c.nome}</span><span>${ct!=null?fmtBRL(ct):'—'}</span>`;
+          `<span style="flex:1;">${highlightName(c.nome)}</span><span>${ct!=null?fmtBRL(ct):'—'}</span>`;
         cRow.addEventListener('click', (e) => {
           e.stopPropagation();
           selectDreChild(c, line);
-          if(hasLeaves){
+          if(hasLeaves && !searchTerm){
             if(childOpen.has(cKey)) childOpen.delete(cKey); else childOpen.add(cKey);
             renderDreWaterfall();
           }
         });
         cWrap.appendChild(cRow);
+        if(ci.childMatches) totalMatches++;
 
         if(hasLeaves){
           const leafBox = document.createElement('div');
@@ -532,12 +584,13 @@ function renderDreWaterfall(){
             const lRow = document.createElement('div');
             lRow.className = 'dre-child-row' + (lActive ? ' active' : '');
             const lt = periodReal(lf);
-            lRow.innerHTML = `<span>${lf.nome}</span><span>${lt!=null?fmtBRL(lt):'—'}</span>`;
+            lRow.innerHTML = `<span>${highlightName(lf.nome)}</span><span>${lt!=null?fmtBRL(lt):'—'}</span>`;
             lRow.addEventListener('click', (e) => {
               e.stopPropagation();
               selectDreLeaf(lf, line, c);
             });
             leafBox.appendChild(lRow);
+            if(matches(lf.nome)) totalMatches++;
           });
           cWrap.appendChild(leafBox);
         }
@@ -547,6 +600,13 @@ function renderDreWaterfall(){
     }
     box.appendChild(wrap);
   });
+
+  const metaEl = document.getElementById('dreSearchMeta');
+  if(searchTerm){
+    metaEl.textContent = totalMatches ? `${totalMatches} resultado${totalMatches>1?'s':''} encontrado${totalMatches>1?'s':''}` : 'Nenhum resultado encontrado.';
+  } else {
+    metaEl.textContent = '';
+  }
 }
 
 let dreExpanded = false;
